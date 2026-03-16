@@ -69,42 +69,12 @@ Notes
 
 
 
-import os
 import requests
 import pandas as pd
 from io import StringIO
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
-
-# Directory where this script lives (CSV caches are stored next to it)
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-
-def fetch_or_fallback(fetch_fn, csv_path, index_col=None):
-    """
-    Try fetch_fn() to get a fresh DataFrame.  On success, save to csv_path
-    if the new data has at least as many rows as the cached file.
-    On failure, load from csv_path.  If no cache exists either, re-raise.
-    """
-    csv_path = os.path.join(_SCRIPT_DIR, csv_path)
-    try:
-        fresh = fetch_fn()
-        # Compare with existing cache
-        if os.path.exists(csv_path):
-            cached = pd.read_csv(csv_path, index_col=index_col)
-            if len(fresh) >= len(cached):
-                fresh.to_csv(csv_path)
-                print(f"[cache] Updated {os.path.basename(csv_path)} ({len(fresh)} rows)")
-            else:
-                print(f"[cache] Kept existing {os.path.basename(csv_path)} ({len(cached)} rows >= {len(fresh)} fresh)")
-        else:
-            fresh.to_csv(csv_path)
-            print(f"[cache] Created {os.path.basename(csv_path)} ({len(fresh)} rows)")
-        return fresh
-    except Exception as e:
-        print(f"[cache] Fetch failed ({e}), loading from {os.path.basename(csv_path)}")
-        if os.path.exists(csv_path):
-            return pd.read_csv(csv_path, index_col=index_col)
-        raise
 
 from statsmodels.tsa.stattools import adfuller, kpss, acf, pacf
 from statsmodels.stats.diagnostic import acorr_ljungbox
@@ -192,16 +162,12 @@ def fetch_ecb_hicp_inflation_panel(
 # Example usage
 # -------------------------
 countries = ["DE", "FR", "IT", "ES", "NL", "BE", "AT", "PT", "IE", "FI", "GR"]
-
-def _fetch_ecb():
-    panel, _ = fetch_ecb_hicp_inflation_panel(
-        countries=countries, start="2000-01", end="2025-12"
-    )
-    return panel
-
-infl_panel = fetch_or_fallback(_fetch_ecb, "data_ecb_hicp_panel.csv", index_col=0)
-
-
+infl_panel, infl_long = fetch_ecb_hicp_inflation_panel(
+    countries=countries,
+    start="2000-01",
+    end="2025-12"   # optional
+)
+#%%
 # -----------------------------------
 # Fetch Ukraine inflation time series
 
@@ -242,11 +208,11 @@ def fetch_ukraine_cpi_prev_month_raw(
     return raw
 
 
-def _fetch_ua():
-    return fetch_ukraine_cpi_prev_month_raw(start="2000-01", end="2025-12")
-
-ua_raw = fetch_or_fallback(_fetch_ua, "data_ukraine_cpi_raw.csv")
+# Example
+ua_raw = fetch_ukraine_cpi_prev_month_raw(start="2000-01", end="2025-12")
 print(ua_raw.head())
+print(ua_raw["TIME_PERIOD"].unique()[:12])
+print(ua_raw["OBS_VALUE"].unique()[:12])
 
 
 
@@ -305,15 +271,15 @@ def cpi_prev_month_index_to_yoy_inflation(idx_prev_month_100: pd.Series) -> pd.S
     return ((yoy_factor - 1.0) * 100.0).rename("UA")
 
 ua_yoy = cpi_prev_month_index_to_yoy_inflation(ua_idx)
-
+#%%
 # Ensure month-start indices match
 infl_panel = infl_panel.copy()
 infl_panel.index = pd.to_datetime(infl_panel.index).to_period("M").to_timestamp(how="start")
-ua_yoy.index = pd.to_datetime(ua_yoy.index).to_period("M").to_timestamp(how="start")
+#ua_yoy.index = pd.to_datetime(ua_yoy.index).to_period("M").to_timestamp(how="start")
 
-infl_panel = infl_panel.join(ua_yoy, how="left")
+#infl_panel = infl_panel.join(ua_yoy, how="left")
 
-
+#%%
 # ------------------------------------------------------------
 # Plot the inflation panel (one line per country)
 # Assumes `infl_panel` is the wide DataFrame returned above:
@@ -364,15 +330,15 @@ print(adf_table.to_string(index=False))
 # -------------------------
 maxlag = 6   # keep small for undergrads
 
-print("\n=== Granger causality tests: X → UA ===")
+print("\n=== Granger causality tests: X → FR ===")
 
 granger_out = []
 
 for c in df.columns:
-    if c == "UA":
+    if c == "FR":
         continue
 
-    data_gc = df[["UA", c]]
+    data_gc = df[["FR", c]]
 
     try:
         res = grangercausalitytests(data_gc, maxlag=maxlag, verbose=False)
@@ -394,7 +360,7 @@ granger_rank = (
     .reset_index(drop=True)
 )
 
-print("\n=== Ranking of countries by Granger causality for UA ===")
+print("\n=== Ranking of countries by Granger causality for FR ===")
 print(granger_rank.to_string(index=False))
 
 # -------------------------
@@ -402,7 +368,7 @@ print(granger_rank.to_string(index=False))
 #    (UA + top 2 predictors)
 # -------------------------
 top_countries = granger_rank["country"].iloc[:2].tolist()
-var_vars = ["UA"] + top_countries
+var_vars = ["FR"] + top_countries
 
 print("\nVAR variables:", var_vars)
 
@@ -422,3 +388,235 @@ print(f"Selected lag order p = {p}")
 var_res = model.fit(p)
 print("\n=== VAR estimation results ===")
 print(var_res.summary())
+#%%
+# -----------------------------------
+# (c) Compute pioneer weights and plot
+# -----------------------------------
+
+# Assuming you have the function compute_pioneer_weights_angles defined somewhere,
+# and that it accepts a T x N DataFrame (time x countries) and returns a DataFrame of same shape
+
+# After running ecb_hicp_panel_var_granger.py, you have infl_panel
+# with columns: DE, FR, IT, ES, NL, BE, AT, PT, IE, FI, GR, UA
+#from pdm import compute_pioneer_weights_angles,compute_pioneer_weights_distance, compute_granger_weights, compute_lagged_correlation_weights,compute_multivariate_regression_weights, compute_transfer_entropy_weights, compute_linear_pooling_weights,compute_median_pooling,pooled_forecast
+
+
+def _leave_one_out_mean(X: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute the leave-one-out mean for each expert.
+
+    For expert i, this is the mean of all other experts at each time step.
+    Used internally by all methods as the cross-sectional benchmark m_{-i}.
+
+    Parameters
+    ----------
+    X : pd.DataFrame
+        (T x N) matrix of expert estimates, already cast to float.
+
+    Returns
+    -------
+    m_minus : pd.DataFrame
+        Same shape as X. Column i contains the mean of all columns except i.
+    """
+    m_minus = pd.DataFrame(index=X.index, columns=X.columns, dtype=float)
+    for col in X.columns:
+        others = X.drop(columns=col)
+        m_minus[col] = others.mean(axis=1)
+    return m_minus
+
+
+# ---------------------------------------------------------------------------
+# 2. PDM with angles (preferred method)
+# ---------------------------------------------------------------------------
+
+def compute_pioneer_weights_angles(
+    forecasts: pd.DataFrame,
+    step: float = 1.0,
+) -> pd.DataFrame:
+    """
+    PDM with angle-based weighting (Equation 4-5 of the paper).
+
+    The angle theta between the movement vector and the horizontal captures
+    the *speed* of convergence. The weight attributed to expert i is:
+        w_i^t = delta_distance * delta_orientation * |theta_{-i}| / (|theta_{-i}| + |theta_i|)
+
+    where theta = arccos((s^2 + u_y * v_y) / (sqrt(s^2 + u_y^2) * sqrt(s^2 + v_y^2)))
+    and s is the time step between observations.
+
+    This is the preferred approach in the paper.
+
+    Parameters
+    ----------
+    forecasts : pd.DataFrame
+        (T x N) DataFrame where rows are time periods and columns are experts.
+        Values must be numeric (int or float).
+    step : float
+        Time step between observations (the x-component of both vectors).
+        Default is 1.0 for unit-spaced observations. Set to the actual
+        inter-observation interval when observations are not unit-spaced
+        (e.g., 12 for annual data indexed monthly).
+
+    Returns
+    -------
+    weights : pd.DataFrame
+        Same shape as ``forecasts``. Contains normalised pioneer weights in
+        [0, 1] that sum to 1 across experts at each time step where at least
+        one pioneer is detected.  Rows with no pioneer contain NaN.
+
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> forecasts = pd.DataFrame({
+    ...     "E1": [1.0, 1.1, 1.2, 1.3],
+    ...     "E2": [0.5, 0.5, 0.9, 1.2],
+    ...     "E3": [0.4, 0.4, 0.8, 1.1],
+    ... })
+    >>> w = compute_pioneer_weights_angles(forecasts)
+    >>> pooled = pooled_forecast(forecasts, w)
+    """
+    X = forecasts.astype(float)
+    m_minus = _leave_one_out_mean(X)
+
+    delta_X = X.diff()
+    delta_m = m_minus.diff()
+
+    # Step 1: distance reduction
+    distance = (X - m_minus).abs()
+    distance_prev = distance.shift(1)
+    cond_distance = distance < distance_prev
+
+    # Step 2: orientation (peers move more — checked via angles)
+    s2 = step ** 2
+
+    def _angle(dy):
+        """Angle between the movement vector (step, dy) and horizontal (step, 0)."""
+        # theta = arccos(s^2 / (sqrt(s^2 + dy^2) * s))  = arctan(|dy| / s)
+        return np.arctan2(dy.abs(), step)
+
+    theta_i = _angle(delta_X)    # expert's own movement angle
+    theta_mi = _angle(delta_m)   # peers' movement angle
+
+    cond_orientation = theta_mi > theta_i
+
+    # Step 3: proportion (angle-based)
+    denom = theta_mi + theta_i
+    proportion = theta_mi / denom
+
+    mask = cond_distance & cond_orientation & (denom > 0)
+    raw = proportion.where(mask, 0.0)
+
+    row_sums = raw.sum(axis=1)
+    weights = raw.div(row_sums.replace(0.0, np.nan), axis=0)
+    return weights
+
+def pooled_forecast(
+    forecasts: pd.DataFrame,
+    weights: pd.DataFrame,
+) -> pd.Series:
+    """
+    Compute the supervisor's pooled estimate: S_t = sum_i w_i^t * x_i^t.
+
+    At time steps where no pioneer is detected (all weights are NaN or sum
+    to zero), the pooled estimate falls back to the simple cross-sectional
+    mean.  This fallback corresponds to the initialisation rule w_i^0 = 1/m
+    described in the paper.
+
+    Parameters
+    ----------
+    forecasts : pd.DataFrame
+        (T x N) expert forecasts.
+    weights : pd.DataFrame
+        (T x N) weights produced by any of the weight-computation functions.
+
+    Returns
+    -------
+    pooled : pd.Series
+        Length-T pooled estimate.
+
+    Examples
+    --------
+    >>> w = compute_pioneer_weights_angles(forecasts)
+    >>> pooled = pooled_forecast(forecasts, w)
+    """
+    forecasts = forecasts.astype(float)
+    weights = weights.astype(float)
+
+    weighted_sum = (forecasts * weights).sum(axis=1, min_count=1)
+
+    weight_sums = weights.sum(axis=1, min_count=1)
+    no_pioneer = weight_sums.isna() | (weight_sums == 0)
+
+    fallback_mean = forecasts.mean(axis=1)
+
+    pooled = weighted_sum.copy()
+    pooled[no_pioneer] = fallback_mean[no_pioneer]
+    return pooled
+
+
+# Backward-compatible alias
+pooled_forecast_simple = pooled_forecast
+
+
+#---PartA: full panel, all countries as "experts"--
+panel = infl_panel.dropna()
+w_angles = compute_pioneer_weights_angles(panel)
+# Average weights by subperiod
+periods = {
+    "I (2002-07)":("2002-01", "2007-12"),
+    "II (2008-12)":("2008-01", "2012-12"),
+    "III (2013-19)":("2013-01", "2019-12"),
+    "IV (2020-21)":("2020-01", "2021-12"),
+    "V (2022-23)":("2022-01", "2023-12"),
+    "VI (2024-25)":("2024-01", "2025-12"),
+}
+for name, (s,e) in periods.items():
+    sub = w_angles.loc[s:e]
+    print(f"\n{name}")
+    print(sub.mean().sort_values(ascending=False))
+#---PartB: EU countries as experts, Ukraine as target--
+eu_cols = [c for c in panel.columns if c != "FR"]
+eu_panel = panel[eu_cols]
+w_eu = compute_pioneer_weights_angles(eu_panel)
+forecast_ua =pooled_forecast(eu_panel, w_eu)
+
+# RMSE vsactual Ukraine inflation
+import numpy as np
+actual_ua = panel["FR"]
+rmse = np.sqrt(((forecast_ua- actual_ua)** 2).mean())
+print(f"RMSE (PDM angles): {rmse:.4f}")
+
+# Apply to the inflation panel
+pioneer_weights = compute_pioneer_weights_angles(df)  # T x 12 DataFrame
+
+# Inspect a snippet
+print(pioneer_weights.head())
+
+# Plot each country's pioneer weight over time
+plt.figure(figsize=(12, 6))
+
+for country in pioneer_weights.columns:
+    plt.plot(pioneer_weights.index, pioneer_weights[country], label=country, linewidth=1)
+
+plt.xlabel("Time")
+plt.ylabel("Pioneer weight")
+plt.title("Time-varying Pioneer Weights of HICP Inflation (ECB Panel)")
+plt.axhline(0, color="black", linestyle="--", linewidth=0.8)
+plt.legend(ncol=3, fontsize=9, frameon=False)
+plt.tight_layout()
+plt.show()
+
+# Alternatively, a heatmap
+import seaborn as sns
+
+plt.figure(figsize=(14, 6))
+sns.heatmap(pioneer_weights.T, cmap="coolwarm", center=0, cbar_kws={'label': 'Pioneer weight'})
+plt.xlabel("Time")
+plt.ylabel("Country")
+plt.title("Heatmap of Pioneer Weights over Time")
+plt.tight_layout()
+plt.show()
+
+# Identify countries with non-zero pioneer weights
+nonzero_summary = (pioneer_weights != 0).sum()
+print("Number of months with non-zero pioneer weight per country:")
+print(nonzero_summary[nonzero_summary > 0])
